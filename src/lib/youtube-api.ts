@@ -13,11 +13,13 @@ declare global {
 export interface YouTubePlayer {
   playVideo(): void;
   pauseVideo(): void;
+  stopVideo(): void;
   loadVideoById(video: string | { videoId: string; startSeconds?: number }): void;
   cueVideoById(video: string | { videoId: string; startSeconds?: number }): void;
   seekTo(seconds: number, allowSeekAhead?: boolean): void;
   getCurrentTime(): number;
   getDuration(): number;
+  getVideoLoadedFraction(): number;
   getPlayerState(): number;
   getIframe(): HTMLIFrameElement;
   setVolume(volume: number): void;
@@ -25,6 +27,12 @@ export interface YouTubePlayer {
   mute(): void;
   unMute(): void;
   isMuted(): boolean;
+  setPlaybackRate?(rate: number): void;
+  getPlaybackRate?(): number;
+  loadModule?(name: string): void;
+  unloadModule?(name: string): void;
+  setOption?(module: string, option: string, value: unknown): void;
+  playerVars?: Record<string, unknown>;
   destroy(): void;
 }
 

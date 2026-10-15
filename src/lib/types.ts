@@ -10,6 +10,9 @@ export interface Video {
   published: string;
   description?: string;
   category?: string;
+  tags?: string[];
+  likes?: string;
+  chapters?: { title: string; at: number }[];
   isShort?: boolean;
   isLive?: boolean;
 }
@@ -26,6 +29,57 @@ export interface Playlist {
   createdAt: number;
   videoIds: string[];
 }
+
+export interface ChannelProfile {
+  name: string;
+  handle: string;
+  tagline: string;
+  subscribers: string;
+  videoCount: number;
+  joined: string;
+  location: string;
+  links: { label: string; href: string }[];
+}
+
+export interface CommunityPost {
+  id: string;
+  author: string;
+  text: string;
+  at: number;
+  likes: number;
+  liked?: boolean;
+  poll?: { label: string; votes: number }[];
+}
+
+export interface CommentEntry {
+  id: string;
+  videoId: string;
+  author: string;
+  text: string;
+  at: number;
+  likes: number;
+  liked?: boolean;
+  pinned?: boolean;
+  replies?: number;
+}
+
+export interface NotificationItem {
+  id: string;
+  kind: "upload" | "live" | "short" | "system";
+  channel: string;
+  title: string;
+  videoId?: string;
+  at: number;
+}
+
+export interface QueueEntry {
+  video: Video;
+  addedAt: number;
+}
+
+export type ThemeName = "dark" | "light";
+export type AccentName = "rose" | "violet" | "aqua" | "amber";
+export type Visibility = "public" | "unlisted" | "private";
 
 export interface RoomMember {
   id: string;
