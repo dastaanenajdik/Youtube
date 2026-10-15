@@ -4,7 +4,25 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { loadYouTubeIframeApi, type YouTubePlayer } from "@/lib/youtube-api";
 import { cleanVideo, videoFromId } from "@/lib/format";
 import { readStorage, writeStorage } from "@/lib/storage";
-import type { Playlist, RoomSession, RoomSnapshot, Video, WatchRecord } from "@/lib/types";
+import { buildNotifications } from "@/lib/feed";
+import { demoVideos } from "@/lib/demo-videos";
+import type { AccentName, CommentEntry, NotificationItem, QueueEntry, ThemeName, Visibility, WatchRecord, Playlist, RoomSession, RoomSnapshot, Video } from "@/lib/types";
+
+export interface GlassSettings {
+  theme: ThemeName;
+  accent: AccentName;
+  reduceMotion: boolean;
+  autoplay: boolean;
+  pauseHistory: boolean;
+  volume: number;
+}
+
+export const ACCENTS: Record<AccentName, { label: string; accent: string; accent2: string; swatch: string }> = {
+  rose: { label: "Sunset rose", accent: "#ff4f6d", accent2: "#c55cff", swatch: "linear-gradient(135deg,#ff5a74,#d83f81)" },
+  violet: { label: "Ultraviolet", accent: "#9b6bff", accent2: "#5ec8ff", swatch: "linear-gradient(135deg,#a274ff,#6a5cf0)" },
+  aqua: { label: "Glacier aqua", accent: "#39d3c8", accent2: "#5aa9ff", swatch: "linear-gradient(135deg,#4ce0cd,#2f8fd6)" },
+  amber: { label: "Amber haze", accent: "#ffb03a", accent2: "#ff6f61", swatch: "linear-gradient(135deg,#ffc25c,#f57a4b)" },
+};
 
 interface AppContextValue {
   hydrated: boolean;
@@ -49,6 +67,33 @@ interface AppContextValue {
   leaveRoom: () => Promise<void>;
   sendRoomMessage: (text: string) => Promise<void>;
   pushNotice: (message: string) => void;
+  settings: GlassSettings;
+  updateSettings: (patch: Partial<GlassSettings>) => void;
+  cycleTheme: () => void;
+  queue: QueueEntry[];
+  addToQueue: (video: Video) => void;
+  removeFromQueue: (videoId: string) => void;
+  clearQueue: () => void;
+  playFromQueue: (videoId: string) => void;
+  comments: Record<string, CommentEntry[]>;
+  addComment: (videoId: string, text: string) => void;
+  toggleCommentLike: (videoId: string, commentId: string) => void;
+  removeComment: (videoId: string, commentId: string) => void;
+  reactions: Record<string, "like" | "dislike">;
+  react: (video: Video, kind: "like" | "dislike") => void;
+  notifications: NotificationItem[];
+  unreadCount: number;
+  markNotificationsRead: () => void;
+  visibility: Record<string, Visibility>;
+  setVisibility: (videoId: string, value: Visibility) => void;
+  rate: number;
+  setRate: (value: number) => void;
+  captions: boolean;
+  toggleCaptions: () => void;
+  clearCurrentPlayer: () => void;
+  paletteOpen: boolean;
+  setPaletteOpen: (open: boolean) => void;
+  openPalette: () => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -62,6 +107,22 @@ const STORAGE = {
   videos: "ytglass.video-cache.v1",
   currentVideo: "ytglass.current-video.v1",
   room: "ytglass.room-session.v1",
+  settings: "ytglass.settings.v1",
+  comments: "ytglass.comments.v1",
+  reactions: "ytglass.reactions.v1",
+  queue: "ytglass.queue.v1",
+  posts: "ytglass.posts.v1",
+  visibility: "ytglass.visibility.v1",
+  notifRead: "ytglass.notifications-read.v1",
+};
+
+const DEFAULT_SETTINGS: GlassSettings = {
+  theme: "dark",
+  accent: "rose",
+  reduceMotion: false,
+  autoplay: true,
+  pauseHistory: false,
+  volume: 72,
 };
 
 function newId(): string {
@@ -95,6 +156,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
   const [roomBusy, setRoomBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [settings, setSettings] = useState<GlassSettings>(DEFAULT_SETTINGS);
+  const [queue, setQueue] = useState<QueueEntry[]>([]);
+  const [comments, setComments] = useState<Record<string, CommentEntry[]>>({});
+  const [reactions, setReactions] = useState<Record<string, "like" | "dislike">>({});
+  const [notificationsReadAt, setNotificationsReadAt] = useState(0);
+  const [systemNotices, setSystemNotices] = useState<NotificationItem[]>([]);
+  const [visibility, setVisibilityState] = useState<Record<string, Visibility>>({});
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [rate, setRateState] = useState(1);
+  const [captions, setCaptions] = useState(false);
 
   const playerRef = useRef<YouTubePlayer | null>(null);
   const playerHostRef = useRef<HTMLDivElement | null>(null);
@@ -113,6 +184,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     muted: false,
     roomSession: null as RoomSession | null,
     roomSnapshot: null as RoomSnapshot | null,
+    pauseHistory: false,
+    autoplay: true,
+    queue: [] as QueueEntry[],
+    reactions: {} as Record<string, "like" | "dislike">,
+    displayName: "You",
   });
   const lastRoomControlVersionRef = useRef(0);
   const syncPlayerToStateRef = useRef<() => Promise<void>>(async () => undefined);
@@ -127,11 +203,57 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setVideos(readStorage(STORAGE.videos, {}));
     setCurrentVideo(readStorage(STORAGE.currentVideo, null));
     setRoomSession(readStorage(STORAGE.room, null));
+    const storedSettings = { ...DEFAULT_SETTINGS, ...readStorage<Partial<GlassSettings>>(STORAGE.settings, {}) };
+    setSettings(storedSettings);
+    setVolume(storedSettings.volume);
+    setQueue(readStorage<QueueEntry[]>(STORAGE.queue, []));
+    setComments(readStorage<Record<string, CommentEntry[]>>(STORAGE.comments, {}));
+    setReactions(readStorage<Record<string, "like" | "dislike">>(STORAGE.reactions, {}));
+    setVisibilityState(readStorage<Record<string, Visibility>>(STORAGE.visibility, {}));
+    setNotificationsReadAt(readStorage<number>(STORAGE.notifRead, 0));
+    setSystemNotices([{
+      id: "system-glass",
+      kind: "system",
+      channel: "YouTube Glass",
+      title: "Every control in this build is frosted glass — try the theme and accent switchers in Settings.",
+      at: Date.now() - 3_600_000,
+    }]);
     setHydrated(true);
   }, []);
 
   useEffect(() => {
-    playerStateRef.current = { currentVideo, isPlaying, volume, muted, roomSession, roomSnapshot };
+    if (!hydrated) return;
+    writeStorage(STORAGE.settings, settings);
+  }, [hydrated, settings]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const root = document.documentElement;
+    const accent = ACCENTS[settings.accent] ?? ACCENTS.rose;
+    root.dataset.theme = settings.theme;
+    root.dataset.motion = settings.reduceMotion ? "reduced" : "full";
+    root.style.setProperty("--accent", accent.accent);
+    root.style.setProperty("--accent-2", accent.accent2);
+    root.style.setProperty("--accent-grad", accent.swatch);
+  }, [settings.theme, settings.accent, settings.reduceMotion]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    writeStorage(STORAGE.queue, queue);
+    writeStorage(STORAGE.comments, comments);
+    writeStorage(STORAGE.reactions, reactions);
+    writeStorage(STORAGE.visibility, visibility);
+    writeStorage(STORAGE.notifRead, notificationsReadAt);
+  }, [hydrated, queue, comments, reactions, visibility, notificationsReadAt]);
+
+  useEffect(() => {
+    const state = playerStateRef.current;
+    state.currentVideo = currentVideo;
+    state.isPlaying = isPlaying;
+    state.volume = volume;
+    state.muted = muted;
+    state.roomSession = roomSession;
+    state.roomSnapshot = roomSnapshot;
   }, [currentVideo, isPlaying, volume, muted, roomSession, roomSnapshot]);
 
   useEffect(() => {
@@ -218,10 +340,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setDuration(safeVideo.durationSeconds || 0);
     setPlayerIssue("");
     setVideos((previous) => ({ ...previous, [safeVideo.id]: safeVideo }));
-    setHistory((previous) => {
-      const without = previous.filter((record) => record.video.id !== safeVideo.id);
-      return [{ video: safeVideo, watchedAt: Date.now(), positionSeconds: 0 }, ...without].slice(0, 100);
-    });
+    if (!playerStateRef.current.pauseHistory) {
+      setHistory((previous) => {
+        const without = previous.filter((record) => record.video.id !== safeVideo.id);
+        return [{ video: safeVideo, watchedAt: Date.now(), positionSeconds: 0 }, ...without].slice(0, 100);
+      });
+    }
     lastPlayerCommandRef.current = autoplay ? "play" : "pause";
     void syncPlayerToStateRef.current();
     if (playerStateRef.current.roomSession) {
@@ -403,6 +527,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
                 if (wasPlaying && playerStateRef.current.roomSession && !roomSyncGuardRef.current) {
                   void sendRoomControl("pause", { positionSeconds: event.target.getCurrentTime() });
                 }
+                if (event.data === 0 && playerStateRef.current.autoplay) {
+                  const [nextEntry, ...rest] = playerStateRef.current.queue;
+                  if (nextEntry) {
+                    playerStateRef.current.queue = rest;
+                    setQueue(rest);
+                    openVideo(nextEntry.video, true);
+                  }
+                }
               }
             },
             onError: (event: { data: number }) => {
@@ -444,7 +576,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     } catch {
       // The IFrame API will report its current state on the next poll.
     }
-  }, [sendRoomControl]);
+  }, [sendRoomControl, openVideo]);
   useEffect(() => {
     syncPlayerToStateRef.current = syncPlayerToState;
   }, [syncPlayerToState]);
@@ -596,6 +728,131 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const clearHistory = useCallback(() => setHistory([]), []);
   const removeHistoryEntry = useCallback((videoId: string) => setHistory((previous) => previous.filter((record) => record.video.id !== videoId)), []);
 
+  const updateSettings = useCallback((patch: Partial<GlassSettings>) => {
+    setSettings((previous) => ({ ...previous, ...patch }));
+  }, []);
+
+  const cycleTheme = useCallback(() => {
+    setSettings((previous) => ({ ...previous, theme: previous.theme === "dark" ? "light" : "dark" }));
+  }, []);
+
+  useEffect(() => {
+    playerStateRef.current.pauseHistory = settings.pauseHistory;
+    playerStateRef.current.autoplay = settings.autoplay;
+  }, [settings.pauseHistory, settings.autoplay]);
+
+  useEffect(() => {
+    setSettings((previous) => (previous.volume === volume ? previous : { ...previous, volume }));
+  }, [volume]);
+
+  const playFromQueue = useCallback((videoId: string) => {
+    const entry = playerStateRef.current.queue.find((item) => item.video.id === videoId);
+    if (!entry) return;
+    setQueue((previous) => previous.filter((item) => item.video.id !== videoId));
+    openVideo(entry.video, true);
+  }, [openVideo]);
+
+  const addToQueue = useCallback((video: Video) => {
+    playerStateRef.current.queue = [...playerStateRef.current.queue.filter((item) => item.video.id !== video.id), { video, addedAt: Date.now() }].slice(-25);
+    setQueue(playerStateRef.current.queue);
+    pushNotice("Added to the queue");
+  }, [pushNotice]);
+
+  const removeFromQueue = useCallback((videoId: string) => {
+    playerStateRef.current.queue = playerStateRef.current.queue.filter((item) => item.video.id !== videoId);
+    setQueue(playerStateRef.current.queue);
+  }, []);
+
+  const clearQueue = useCallback(() => {
+    playerStateRef.current.queue = [];
+    setQueue([]);
+  }, []);
+
+  const react = useCallback((video: Video, kind: "like" | "dislike") => {
+    setReactions((previous) => {
+      const next = { ...previous };
+      if (next[video.id] === kind) delete next[video.id];
+      else next[video.id] = kind;
+      playerStateRef.current.reactions = next;
+      return next;
+    });
+    setVideos((previous) => ({ ...previous, [video.id]: video }));
+  }, []);
+
+  const addComment = useCallback((videoId: string, text: string) => {
+    const clean = text.replace(/[\u0000-\u001f<>]/g, " ").trim().slice(0, 600);
+    if (!clean || !videoId) return;
+    const entry: CommentEntry = {
+      id: typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      videoId,
+      author: playerStateRef.current.displayName || "You",
+      text: clean,
+      at: Date.now(),
+      likes: 0,
+    };
+    setComments((previous) => ({ ...previous, [videoId]: [entry, ...(previous[videoId] ?? [])] }));
+  }, []);
+
+  const toggleCommentLike = useCallback((videoId: string, commentId: string) => {
+    setComments((previous) => ({
+      ...previous,
+      [videoId]: (previous[videoId] ?? []).map((comment) => comment.id === commentId
+        ? { ...comment, liked: !comment.liked, likes: Math.max(0, comment.likes + (comment.liked ? -1 : 1)) }
+        : comment),
+    }));
+  }, []);
+
+  const removeComment = useCallback((videoId: string, commentId: string) => {
+    setComments((previous) => ({ ...previous, [videoId]: (previous[videoId] ?? []).filter((comment) => comment.id !== commentId) }));
+  }, []);
+
+  const markNotificationsRead = useCallback(() => setNotificationsReadAt(Date.now()), []);
+
+  const clearCurrentPlayer = useCallback(() => {
+    playerStateRef.current.currentVideo = null;
+    playerStateRef.current.isPlaying = false;
+    setCurrentVideo(null);
+    setIsPlaying(false);
+    try {
+      playerRef.current?.pauseVideo();
+    } catch {
+      // The player may still be booting; nothing to pause.
+    }
+  }, []);
+
+  const openPalette = useCallback(() => setPaletteOpen(true), []);
+
+  const setRate = useCallback((value: number) => {
+    setRateState(value);
+    try {
+      playerRef.current?.setPlaybackRate?.(value);
+    } catch {
+      // Some embeds lock the playback rate until they are ready.
+    }
+  }, []);
+
+  const toggleCaptions = useCallback(() => {
+    setCaptions((previous) => {
+      const next = !previous;
+      try {
+        if (next) {
+          playerRef.current?.loadModule?.("captions");
+          playerRef.current?.setOption?.("captions", "trackLanguage", "en");
+        } else {
+          playerRef.current?.unloadModule?.("captions");
+        }
+      } catch {
+        // Caption modules are not available on every embed.
+      }
+      return next;
+    });
+  }, []);
+
+  const setVisibility = useCallback((videoId: string, value: Visibility) => {
+    setVisibilityState((previous) => ({ ...previous, [videoId]: value }));
+  }, []);
+
+
   const createRoom = useCallback(async (name = "You") => {
     const memberId = newId();
     setRoomBusy(true);
@@ -695,6 +952,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [pushNotice]);
 
+  useEffect(() => {
+    playerStateRef.current.queue = queue;
+  }, [queue]);
+
+  const notifications = useMemo(
+    () => buildNotifications(subscribedChannels, Object.values(videos).length ? [...Object.values(videos), ...demoVideos] : demoVideos, systemNotices),
+    [subscribedChannels, videos, systemNotices],
+  );
+  const unreadCount = useMemo(() => notifications.filter((item) => item.at > notificationsReadAt).length, [notifications, notificationsReadAt]);
+
   const value = useMemo<AppContextValue>(() => ({
     hydrated,
     videos,
@@ -738,7 +1005,42 @@ export function AppProvider({ children }: { children: ReactNode }) {
     leaveRoom,
     sendRoomMessage,
     pushNotice,
-  }), [hydrated, videos, currentVideo, isPlaying, playbackTime, duration, volume, muted, playerReady, playerIssue, history, searchHistory, likedIds, watchLaterIds, playlists, subscribedChannels, roomSession, roomSnapshot, roomBusy, notice, cacheVideos, rememberSearch, openVideo, setVideoFromUrl, togglePlayback, seekTo, setVolumeLevel, toggleMute, toggleLiked, toggleWatchLater, createPlaylist, addToPlaylist, removePlaylist, toggleSubscription, clearHistory, removeHistoryEntry, registerPlayerHost, createRoom, joinRoom, leaveRoom, sendRoomMessage, pushNotice]);
+    settings,
+    updateSettings,
+    cycleTheme,
+    queue,
+    addToQueue,
+    removeFromQueue,
+    clearQueue,
+    playFromQueue,
+    comments,
+    addComment,
+    toggleCommentLike,
+    removeComment,
+    reactions,
+    react,
+    notifications,
+    unreadCount,
+    markNotificationsRead,
+    visibility,
+    setVisibility,
+    clearCurrentPlayer,
+    rate,
+    setRate,
+    captions,
+    toggleCaptions,
+    paletteOpen,
+    setPaletteOpen,
+    openPalette,
+  }), [
+    hydrated, videos, currentVideo, isPlaying, playbackTime, duration, volume, muted, playerReady, playerIssue, history, searchHistory,
+    likedIds, watchLaterIds, playlists, subscribedChannels, roomSession, roomSnapshot, roomBusy, notice, settings, queue, comments,
+    reactions, notifications, unreadCount, visibility, rate, captions, paletteOpen,
+    cacheVideos, rememberSearch, openVideo, setVideoFromUrl, togglePlayback, seekTo, setVolumeLevel, toggleMute, toggleLiked, toggleWatchLater,
+    createPlaylist, addToPlaylist, removePlaylist, toggleSubscription, clearHistory, removeHistoryEntry, registerPlayerHost, createRoom,
+    joinRoom, leaveRoom, sendRoomMessage, pushNotice, updateSettings, cycleTheme, addToQueue, removeFromQueue, clearQueue, playFromQueue, clearCurrentPlayer,
+    addComment, toggleCommentLike, removeComment, react, markNotificationsRead, setVisibility, openPalette, setRate, toggleCaptions,
+  ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }
@@ -753,11 +1055,4 @@ export function PlayerMount({ className = "" }: { className?: string }) {
   const { registerPlayerHost } = useApp();
   const setRef = useCallback((node: HTMLDivElement | null) => registerPlayerHost(node), [registerPlayerHost]);
   return <div className={`player-mount ${className}`}><div className="player-mount-host" ref={setRef} /></div>;
-}
-
-export function SavedVideoList({ ids, emptyMessage = "Nothing here yet." }: { ids: string[]; emptyMessage?: string }) {
-  const { videos } = useApp();
-  const videoList = ids.map((id) => videos[id]).filter((video): video is Video => Boolean(video));
-  if (!videoList.length) return <div className="empty-state"><div className="empty-state-icon">▶</div><strong>{emptyMessage}</strong><span>Videos you save will show up here.</span></div>;
-  return <div className="saved-video-list">{videoList.map((video) => <div className="saved-video-row" key={video.id}>{video.title}</div>)}</div>;
 }
